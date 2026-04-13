@@ -464,7 +464,10 @@ struct Compute {
     float scales_k[SAGE_BLOCKS_PER_STEP_K];
     LOAD_SCALES_K(scales_k)
 
-    // NOTE: bf16 previously had mutex.wait() here; unified with fp8 below.
+    // Wait until another warpgroup has already executed HGMMA.
+    if constexpr (ENABLE_MUTEX && Kernel_traits::ELEMENT_BYTES == 2) {
+      mutex.wait();
+    }
 
     // Ctile_p is only used once by each n step.
     ctile_p.clear();
@@ -502,9 +505,15 @@ struct Compute {
       cbr.advance();
     }
 
-    if constexpr (ENABLE_MUTEX) {
+    if constexpr (ENABLE_MUTEX && Kernel_traits::ELEMENT_BYTES == 2) {
+      // Notify another warpgroup to execute HGMMA.
+      mutex.arrive();
+    }
+    if constexpr (ENABLE_MUTEX && Kernel_traits::ELEMENT_BYTES == 1) {
       // Synchronize warpgroups after BMM1 via mbarrier rendezvous.
-      // Replaces predicated bar.sync which was UB per PTX spec and caused synccheck errors.
+      // Replaces the predicated bar.sync 2, 256 pattern (named_bar_wait/named_bar_arrive)
+      // which is UB per PTX spec (bar.sync = barrier.sync.aligned requires all CTA threads
+      // to execute the same instruction) and was flagged by compute-sanitizer synccheck.
       mutex.arrive();
       mutex.wait();
     }
