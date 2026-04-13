@@ -464,10 +464,7 @@ struct Compute {
     float scales_k[SAGE_BLOCKS_PER_STEP_K];
     LOAD_SCALES_K(scales_k)
 
-    // Wait until another warpgroup has already executed HGMMA.
-    if constexpr (ENABLE_MUTEX && Kernel_traits::ELEMENT_BYTES == 2) {
-      mutex.wait();
-    }
+    // NOTE: bf16 previously had mutex.wait() here; unified with fp8 below.
 
     // Ctile_p is only used once by each n step.
     ctile_p.clear();
@@ -505,13 +502,11 @@ struct Compute {
       cbr.advance();
     }
 
-    if constexpr (ENABLE_MUTEX && Kernel_traits::ELEMENT_BYTES == 2) {
-      // Notify another warpgroup to execute HGMMA.
+    if constexpr (ENABLE_MUTEX) {
+      // Synchronize warpgroups after BMM1 via mbarrier rendezvous.
+      // Replaces predicated bar.sync which was UB per PTX spec and caused synccheck errors.
       mutex.arrive();
-    }
-    if constexpr (ENABLE_MUTEX && Kernel_traits::ELEMENT_BYTES == 1) {
-      // Wait until another warpgroup has already executed QGMMA.
-      mutex.named_bar_wait();
+      mutex.wait();
     }
 
     // Fragment p for BMM2 input
@@ -538,10 +533,6 @@ struct Compute {
 
     // Softmax Exp, max/sum, and update scales. If returns false we skip the rest.
     if (!softmax.compute_and_update_scale<IS_FIRST_COL>(p_max, p_sum, skip_softmax_vote)) {
-      if constexpr (ENABLE_MUTEX && Kernel_traits::ELEMENT_BYTES == 1) {
-        // Notify another warpgroup to execute QGMMA.
-        mutex.named_bar_arrive();
-      }
       // Need to wait V, otherwise compute-sanitizer synccheck will fail.
       int ready2 = cbr_v.peek();
       if (!ready2) {
@@ -564,11 +555,6 @@ struct Compute {
 
     // Update flash attention scales and pack it for BMM2
     softmax.pack<IS_FIRST_COL>(ctile_o, frag_p);
-
-    if constexpr (ENABLE_MUTEX && Kernel_traits::ELEMENT_BYTES == 1) {
-      // Notify another warpgroup to execute QGMMA.
-      mutex.named_bar_arrive();
-    }
 
     // Wait until v buffer is ready.
     int ready = cbr_v.peek();
