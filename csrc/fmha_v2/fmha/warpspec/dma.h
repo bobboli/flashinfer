@@ -494,15 +494,19 @@ struct DMA {
   if constexpr (DMA_GROUP_TRANSPOSE_V) {                                                         \
     v_barrier_id =                                                                               \
         cbw_v_scratch.tmaReserve(elect_one_, (TILE_SIZE_V) * Kernel_traits::ELEMENT_BYTES);      \
-    v_barrier_ptr = cbw_v_scratch.barrier_ptr(v_barrier_id);                                     \
     v_smem = shared->smem_v_scratch.data();                                                      \
   } else {                                                                                       \
     v_barrier_id = cbw_v.tmaReserve(elect_one_, (TILE_SIZE_V) * Kernel_traits::ELEMENT_BYTES);   \
-    v_barrier_ptr = cbw_v.barrier_ptr(v_barrier_id);                                             \
     v_smem = shared->smem_v.data();                                                              \
   }                                                                                              \
                                                                                                  \
-  named_barrier_wait(SYNC_BARRIER, NUM_THREADS_IN_DMA_GROUP);
+  named_barrier_wait(SYNC_BARRIER, NUM_THREADS_IN_DMA_GROUP);                                    \
+                                                                                                 \
+  if constexpr (DMA_GROUP_TRANSPOSE_V) {                                                         \
+    v_barrier_ptr = cbw_v_scratch.barrier_ptr(v_barrier_id);                                     \
+  } else {                                                                                       \
+    v_barrier_ptr = cbw_v.barrier_ptr(v_barrier_id);                                             \
+  }
 
     // Load k,v tiles from gmem to smem by TMA.
     template <typename BufferWriter, typename BufferWriterScratch>
@@ -605,11 +609,12 @@ struct DMA {
       Transposer transposer(threadIdx.x % NUM_THREADS_IN_DMA_GROUP);
 
       // Src buffer available
-      int ready = cbr_v_scratch.peek();
+      int ready = cbr_v_scratch.peek(v_scratch_barrier_id);
       if (!ready) {
-        cbr_v_scratch.wait();
+        cbr_v_scratch.wait(v_scratch_barrier_id);
       }
-      uint32_t smem_v_src = __cvta_generic_to_shared(&shared->smem_v_scratch[v_scratch_barrier_id]);
+      uint32_t smem_v_src =
+          __cvta_generic_to_shared(&shared->smem_v_scratch[v_scratch_barrier_id * TILE_SIZE_V]);
 
       // Dst buffer available
       int v_barrier_id = cbw_v.threadReserve();
@@ -678,7 +683,7 @@ struct DMA {
       fence_view_async_shared();                                   // Commit STSM
       named_barrier_wait(SYNC_BARRIER, NUM_THREADS_IN_DMA_GROUP);  // Sync before signaling
       cbw_v.threadCommit(elect_one_, v_barrier_id);                // Signal readiness
-      cbr_v_scratch.pop(elect_one_);                               // Advance to next phase
+      cbr_v_scratch.pop(elect_one_, v_scratch_barrier_id);         // Advance to next phase
     }
 
     inline __device__ void get_next_tile_id(int local_wid, int tiw, uint32_t smem_tile_id,

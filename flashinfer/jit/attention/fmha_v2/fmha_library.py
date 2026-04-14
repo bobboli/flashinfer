@@ -186,7 +186,11 @@ def generate_kernel_spec(
 
     # Override class defaults that always differ
     spec["flash_attention"] = True  # Class default is False
-    spec["scheduling_mode"] = 1  # Class default is 0
+    # Persistent scheduling assumes a uniform number of q-tile work units per head. That holds for
+    # bf16/fp16, but fp8 qgmma kernels can deadlock under racecheck when a launch mixes heads with
+    # different m_steps (for example seq_lens [1024, 514]). Keep fp8 on the static schedule until
+    # the dynamic scheduler handles ragged tile counts safely.
+    spec["scheduling_mode"] = 0 if dtype in ["e4m3", "e4m3_fp32"] else 1
 
     # # SM-specific configuration
     # if warp_specialization:
